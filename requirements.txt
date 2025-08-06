@@ -1,2 +1,2 @@
-openai
 discord.py
+openai>=1.0.0
