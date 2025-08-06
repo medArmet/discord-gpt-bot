@@ -2,8 +2,8 @@ import discord
 import openai
 import os
 
-# ✅ Use OpenAI v1+ SDK correctly
-openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ✅ Proper client instantiation for openai>=1.0
+client_openai = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 intents = discord.Intents.default()
@@ -28,7 +28,7 @@ async def on_message(message):
         await message.channel.send("⏳ Generating...")
 
         try:
-            response = openai_client.chat.completions.create(
+            response = client_openai.chat.completions.create(
                 model="o1",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.8,
