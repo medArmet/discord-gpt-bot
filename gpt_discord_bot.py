@@ -2,7 +2,7 @@ import discord
 import openai
 import os
 
-# ✅ Securely get your API key from env vars
+# ✅ Use OpenAI v1+ SDK correctly
 openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -32,7 +32,7 @@ async def on_message(message):
                 model="o1",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.8,
-                max_tokens=500,
+                max_tokens=500
             )
             reply = response.choices[0].message.content.strip()
             await message.channel.send(reply[:1900])
