@@ -1,7 +1,6 @@
 import os
 import discord
 from openai import OpenAI
-import asyncio
 
 client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -29,11 +28,11 @@ async def on_message(message):
 
         try:
             response = client_openai.responses.create(
-                model="gpt-4o",
-                tools=[{"type": "web_search_preview"}],
+                model="gpt-4o",  # ✅ DO NOT use gpt-4o-search-preview here
+                tools=[{"type": "web_search"}],  # ✅ Not web_search_preview
                 input=prompt
             )
-            await message.channel.send(response.output_text)
+            await message.channel.send(response.output_text[:1900])
         except Exception as e:
             await message.channel.send(f"❌ Error: {str(e)}")
 
