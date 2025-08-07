@@ -67,9 +67,9 @@ async def on_message(message):
             messages[0]["content"].append({"type": "image_url", "image_url": {"url": url}})
 
         try:
-            # First GPT call with tools enabled
+            # First GPT call using gpt-4o-search-preview
             response = openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-search-preview",
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
@@ -90,7 +90,7 @@ async def on_message(message):
                         })
                         # Second GPT call with result
                         followup = openai_client.chat.completions.create(
-                            model="gpt-4o",
+                            model="gpt-4o-search-preview",
                             messages=messages,
                             max_tokens=1000
                         )
