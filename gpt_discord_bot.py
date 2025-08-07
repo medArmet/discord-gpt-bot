@@ -18,24 +18,21 @@ async def on_message(message):
     if message.author.bot or not message.content.startswith("!gpt"):
         return
 
-    user_prompt = message.content[5:].strip()
-    image_attachments = [a for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+    prompt = message.content[5:].strip()
+    attachments = [a for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
 
-    if not user_prompt and not image_attachments:
-        await message.channel.send("❗ Please provide a message or attach an image.")
+    if not prompt and not attachments:
+        await message.channel.send("❗ Please provide a prompt or attach an image.")
         return
 
     await message.channel.send("⏳ Thinking...")
 
     try:
-        # If there's an image, use Chat Completions API (supports vision)
-        if image_attachments:
-            content = [{"type": "text", "text": user_prompt or "Analyze this image."}]
-            for attachment in image_attachments:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": attachment.url}
-                })
+        # 🔍 Case 1: Image analysis — use chat.completions (vision support)
+        if attachments:
+            content = [{"type": "text", "text": prompt or "Analyze this image."}]
+            for a in attachments:
+                content.append({"type": "image_url", "image_url": {"url": a.url}})
 
             response = client_openai.chat.completions.create(
                 model="gpt-4o",
@@ -44,11 +41,11 @@ async def on_message(message):
             )
             reply = response.choices[0].message.content.strip()
 
-        # If no image, try Responses API with tools
+        # 🔍 Case 2: Pure text prompt — use responses.create with tools
         else:
             response = client_openai.responses.create(
                 model="gpt-4o",
-                input=user_prompt,
+                input=prompt,
                 tools=[
                     {"type": "web_search"},
                     {"type": "image_generation"}
