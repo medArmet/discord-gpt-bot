@@ -20,17 +20,22 @@ async def on_message(message):
 
     if message.content.startswith("!gpt"):
         prompt = message.content[5:].strip()
+
         if not prompt:
-            await message.channel.send("❗ Please provide a prompt to search or ask.")
+            await message.channel.send("❗ Please provide a prompt to search, analyze, or respond to.")
             return
 
-        await message.channel.send("⏳ Searching the web...")
+        await message.channel.send("⏳ Thinking...")
 
         try:
             response = client_openai.responses.create(
-                model="gpt-4o",  # ✅ DO NOT use gpt-4o-search-preview here
-                tools=[{"type": "web_search"}],  # ✅ Not web_search_preview
-                input=prompt
+                model="gpt-4o",
+                input=prompt,
+                tools=[
+                    {"type": "web_search"},
+                    {"type": "file_search"},
+                    {"type": "image_generation"}
+                ]
             )
             await message.channel.send(response.output_text[:1900])
         except Exception as e:
