@@ -29,7 +29,7 @@ async def on_message(message):
     await message.channel.send("⏳ Thinking...")
 
     try:
-        # ✅ Case 1: Handle images only if present
+        # 🖼 Case 1: Analyze image with chat completions
         if image_attachments:
             content = [{"type": "text", "text": prompt or "Analyze this image."}]
             for a in image_attachments:
@@ -42,15 +42,12 @@ async def on_message(message):
             )
             reply = response.choices[0].message.content.strip()
 
-        # ✅ Case 2: Only text → use .responses.create() to avoid gpt-image-1
+        # 🧠 Case 2: Pure text — use web_search only
         else:
             response = client_openai.responses.create(
                 model="gpt-4o",
                 input=prompt,
-                tools=[
-                    {"type": "web_search"},
-                    {"type": "image_generation"}
-                ]
+                tools=[{"type": "web_search"}]  # ❌ No image_generation
             )
             reply = response.output_text.strip()
 
