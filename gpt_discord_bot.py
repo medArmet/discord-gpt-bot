@@ -19,19 +19,20 @@ async def on_message(message):
         return
 
     prompt = message.content[5:].strip()
-    attachments = [a for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+    attachments = message.attachments or []
+    image_attachments = [a for a in attachments if a.content_type and a.content_type.startswith("image/")]
 
-    if not prompt and not attachments:
-        await message.channel.send("❗ Please provide a prompt or attach an image.")
+    if not prompt and not image_attachments:
+        await message.channel.send("❗ Please provide a message or attach an image.")
         return
 
     await message.channel.send("⏳ Thinking...")
 
     try:
-        # 🔍 Case 1: Image analysis — use chat.completions (vision support)
-        if attachments:
+        # ✅ Case 1: Handle images only if present
+        if image_attachments:
             content = [{"type": "text", "text": prompt or "Analyze this image."}]
-            for a in attachments:
+            for a in image_attachments:
                 content.append({"type": "image_url", "image_url": {"url": a.url}})
 
             response = client_openai.chat.completions.create(
@@ -41,7 +42,7 @@ async def on_message(message):
             )
             reply = response.choices[0].message.content.strip()
 
-        # 🔍 Case 2: Pure text prompt — use responses.create with tools
+        # ✅ Case 2: Only text → use .responses.create() to avoid gpt-image-1
         else:
             response = client_openai.responses.create(
                 model="gpt-4o",
