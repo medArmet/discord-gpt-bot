@@ -1,17 +1,9 @@
-import os
+import aiohttp
+import io
 import discord
 from openai import OpenAI
 
 client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-
-intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
-
-@client.event
-async def on_ready():
-    print(f"✅ Logged in as {client.user}")
 
 @client.event
 async def on_message(message):
@@ -19,41 +11,47 @@ async def on_message(message):
         return
 
     prompt = message.content[5:].strip()
-    attachments = message.attachments or []
-    image_attachments = [a for a in attachments if a.content_type and a.content_type.startswith("image/")]
+    attachments = message.attachments
 
-    if not prompt and not image_attachments:
-        await message.channel.send("❗ Please provide a message or attach an image.")
+    if not prompt and not attachments:
+        await message.channel.send("❗ Please provide text or attach a file/image.")
         return
 
-    await message.channel.send("⏳ Thinking...")
+    thinking_msg = await message.channel.send("⏳ Thinking...")
 
     try:
-        # 🖼 Case 1: Analyze image with chat completions
-        if image_attachments:
-            content = [{"type": "text", "text": prompt or "Analyze this image."}]
-            for a in image_attachments:
-                content.append({"type": "image_url", "image_url": {"url": a.url}})
+        content_parts = []
 
-            response = client_openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": content}],
-                max_tokens=1000
-            )
-            reply = response.choices[0].message.content.strip()
+        # Add text from user
+        if prompt:
+            content_parts.append({"type": "input_text", "text": prompt})
 
-        # 🧠 Case 2: Pure text — use web_search only
-        else:
-            response = client_openai.responses.create(
-                model="gpt-4o",
-                input=prompt,
-                tools=[{"type": "web_search"}]  # ❌ No image_generation
-            )
-            reply = response.output_text.strip()
+        # Process attachments
+        for a in attachments:
+            if a.content_type and a.content_type.startswith("image/"):
+                # Vision input
+                content_parts.append({"type": "input_image", "image_url": a.url})
+            else:
+                # Download file from Discord
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(a.url) as resp:
+                        file_bytes = await resp.read()
+                # Basic handling: treat as text if possible
+                try:
+                    text = file_bytes.decode("utf-8", errors="ignore")
+                    content_parts.append({"type": "input_text", "text": f"File '{a.filename}' content:\n{text}"})
+                except:
+                    content_parts.append({"type": "input_text", "text": f"File '{a.filename}' uploaded, but could not decode as text."})
 
-        await message.channel.send(reply[:1900])
+        # Send to GPT-5
+        response = client_openai.responses.create(
+            model="gpt-5",
+            input=[{"role": "user", "content": content_parts}],
+            max_output_tokens=1500
+        )
+
+        reply = response.output_text.strip()
+        await thinking_msg.edit(content=reply[:1900])
 
     except Exception as e:
-        await message.channel.send(f"❌ Error: {str(e)}")
-
-client.run(DISCORD_TOKEN)
+        await thinking_msg.edit(content=f"❌ Error: {e}")
