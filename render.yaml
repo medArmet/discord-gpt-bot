@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: ""
-    startCommand: python gpt_discord_bot.py
+    startCommand: python -u gpt_discord_bot.py   # -u = unbuffered logs
     envVars:
       - key: OPENAI_API_KEY
         sync: false
