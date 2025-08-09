@@ -9,7 +9,8 @@ from openai import OpenAI
 # ===== CONFIG =====
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-MODEL = "gpt-5"  # or "gpt-5-mini"
+PRIMARY_MODEL = "gpt-5"       # main model
+FALLBACK_MODEL = "gpt-5-mini" # fallback if empty output
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY is not set")
@@ -51,7 +52,7 @@ def csv_preview(data: bytes, limit_rows: int = 30) -> str:
     csv.writer(out).writerows(rows)
     return out.getvalue()
 
-def safe_extract_text(completion) -> str:
+def extract_text(completion) -> str:
     try:
         msg = completion.choices[0].message
         if msg and getattr(msg, "content", None):
@@ -59,6 +60,16 @@ def safe_extract_text(completion) -> str:
     except Exception:
         pass
     return ""
+
+async def call_openai_chat(model: str, messages: list, max_tokens: int = 1200):
+    """Run blocking API call in a thread (prevents Discord heartbeat stalls)."""
+    def _do():
+        return client_openai.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_completion_tokens=max_tokens,  # GPT-5 requires this name
+        )
+    return await asyncio.to_thread(_do)
 
 # ===== DISCORD EVENTS =====
 @client.event
@@ -70,7 +81,8 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.content.startswith("!gpt"):
         return
 
-    prompt = message.content[5:].strip()
+    raw_prompt = message.content[5:]  # keep raw for logging
+    prompt = raw_prompt.strip()
     attachments = message.attachments or []
 
     if not prompt and not attachments:
@@ -80,81 +92,119 @@ async def on_message(message: discord.Message):
     thinking = await message.channel.send("⏳ Thinking...")
 
     try:
-        # Build Chat Completions mixed 'content' for the user turn
-        user_content = []
-        if prompt:
-            user_content.append({"type": "text", "text": prompt})
+        # --- Build user content ---
+        text_only = True
+        content_blocks = []  # used when we have attachments (images/files)
 
-        for a in attachments:
-            ctype = (a.content_type or "").lower()
-            if ctype.startswith("image/"):
-                user_content.append({"type": "image_url", "image_url": {"url": a.url}})
-            else:
-                # Non-image: download and include text/preview
-                file_bytes = await download_bytes(a.url)
+        if attachments:
+            text_only = False
 
-                if ctype.endswith("/csv") or a.filename.lower().endswith(".csv"):
-                    preview = csv_preview(file_bytes, limit_rows=30)
-                    user_content.append({
-                        "type": "text",
-                        "text": (
-                            f"CSV file '{a.filename}' preview (first ~30 rows):\n\n{preview}\n\n"
-                            "Task: Analyze this CSV. Summarize columns & datatypes, key stats, outliers, "
-                            "sentiment themes (if any), and give 3 actionable insights."
-                        )
-                    })
+        if text_only:
+            # SIMPLE STRING for text-only (most reliable path)
+            user_message_content = prompt or "Please answer in plain text."
+        else:
+            # MULTIMODAL ARRAY for images/files
+            if prompt:
+                content_blocks.append({"type": "text", "text": prompt})
+
+            for a in attachments:
+                ctype = (a.content_type or "").lower()
+                if ctype.startswith("image/"):
+                    content_blocks.append({"type": "image_url", "image_url": {"url": a.url}})
                 else:
-                    # Generic text decode (truncate to keep tokens reasonable)
-                    try:
-                        txt = file_bytes.decode("utf-8", errors="ignore")
-                    except Exception:
-                        txt = ""
-                    if txt.strip():
-                        if len(txt) > 50_000:
-                            txt = txt[:50_000] + "\n...[truncated]..."
-                        user_content.append({
-                            "type": "text",
-                            "text": f"File '{a.filename}' content:\n{txt}\n\nTask: Analyze this file."
-                        })
-                    else:
-                        user_content.append({
+                    # Non-image file: download & include text/preview
+                    file_bytes = await download_bytes(a.url)
+
+                    if ctype.endswith("/csv") or a.filename.lower().endswith(".csv"):
+                        preview = csv_preview(file_bytes, limit_rows=30)
+                        content_blocks.append({
                             "type": "text",
                             "text": (
-                                f"File '{a.filename}' uploaded (type: {ctype or 'unknown'}), "
-                                "but could not be decoded as text. Suggest how to process it."
+                                f"CSV file '{a.filename}' preview (first ~30 rows):\n\n{preview}\n\n"
+                                "Task: Analyze this CSV. Summarize columns & datatypes, key stats, outliers, "
+                                "sentiment themes (if any), and give 3 actionable insights."
                             )
                         })
+                    else:
+                        # generic text decode (truncate to keep tokens reasonable)
+                        try:
+                            txt = file_bytes.decode("utf-8", errors="ignore")
+                        except Exception:
+                            txt = ""
+                        if txt.strip():
+                            if len(txt) > 50_000:
+                                txt = txt[:50_000] + "\n...[truncated]..."
+                            content_blocks.append({
+                                "type": "text",
+                                "text": f"File '{a.filename}' content:\n{txt}\n\nTask: Analyze this file."
+                            })
+                        else:
+                            content_blocks.append({
+                                "type": "text",
+                                "text": (
+                                    f"File '{a.filename}' uploaded (type: {ctype or 'unknown'}), "
+                                    "but could not be decoded as text. Suggest how to process it."
+                                )
+                            })
 
-        if not prompt:
-            user_content.append({
-                "type": "text",
-                "text": "Please respond only in plain text with a concise but detailed analysis."
-            })
+            if not prompt:
+                content_blocks.append({
+                    "type": "text",
+                    "text": "Please respond only in plain text with a concise but detailed analysis."
+                })
 
+            user_message_content = content_blocks
+
+        # --- Build messages ---
+        system_prompt = (
+            "You are a helpful assistant. Always respond in plain text. "
+            "Be concise, use bullet points when helpful, and give clear next steps."
+        )
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful analyst. Always respond in plain text. "
-                    "Be concise, use bullet points when helpful, and give clear next steps."
-                ),
-            },
-            {"role": "user", "content": user_content},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message_content},
         ]
 
-        # Run blocking API call in a worker thread so we don't block Discord heartbeats
-        def call_openai_chat():
-            return client_openai.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                max_completion_tokens=1200  # ✅ correct for GPT-5
-            )
+        # --- LOG what we're sending (for Render logs) ---
+        print("DEBUG OpenAI call → model:", PRIMARY_MODEL)
+        if text_only:
+            print("DEBUG user content (text):", (user_message_content[:400] + "…") if len(user_message_content) > 400 else user_message_content)
+        else:
+            # Don’t print entire files; just the block types and first 120 chars of texts
+            brief = []
+            for b in content_blocks:
+                if b.get("type") == "image_url":
+                    brief.append({"type": "image_url", "url": b["image_url"].get("url", "")})
+                else:
+                    t = b.get("text", "")
+                    brief.append({"type": "text", "text": (t[:120] + "…") if len(t) > 120 else t})
+            print("DEBUG user content (blocks):", brief)
 
-        completion = await asyncio.to_thread(call_openai_chat)
-        reply = safe_extract_text(completion) or "⚠️ I couldn't generate a response."
+        # --- Primary call ---
+        completion = await call_openai_chat(PRIMARY_MODEL, messages, max_tokens=1200)
+        reply = extract_text(completion)
 
-        # Discord limit ~2000 chars; keep some headroom
-        await thinking.edit(content=reply[:1900])
+        # --- Fallback if empty ---
+        if not reply:
+            print("DEBUG: Empty reply from primary model. Retrying with simplified text message and fallback model.")
+            # Retry with string-only message to remove any chance of schema quirks.
+            retry_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt or "Please answer in plain text."},
+            ]
+            # Try primary again
+            completion = await call_openai_chat(PRIMARY_MODEL, retry_messages, max_tokens=800)
+            reply = extract_text(completion)
+
+            if not reply:
+                # Try fallback model
+                completion = await call_openai_chat(FALLBACK_MODEL, retry_messages, max_tokens=800)
+                reply = extract_text(completion)
+
+        if not reply:
+            reply = "⚠️ I couldn't generate a response."
+
+        await thinking.edit(content=reply[:1900])  # Discord limit ~2000 chars
 
     except Exception as e:
         await thinking.edit(content=f"❌ Error: {e}")
