@@ -51,6 +51,15 @@ def csv_preview(data: bytes, limit_rows: int = 30) -> str:
     csv.writer(out).writerows(rows)
     return out.getvalue()
 
+def safe_extract_text(completion) -> str:
+    try:
+        msg = completion.choices[0].message
+        if msg and getattr(msg, "content", None):
+            return msg.content.strip()
+    except Exception:
+        pass
+    return ""
+
 # ===== DISCORD EVENTS =====
 @client.event
 async def on_ready():
@@ -71,7 +80,7 @@ async def on_message(message: discord.Message):
     thinking = await message.channel.send("⏳ Thinking...")
 
     try:
-        # Build Chat Completions "content" array
+        # Build Chat Completions mixed 'content' for the user turn
         user_content = []
         if prompt:
             user_content.append({"type": "text", "text": prompt})
@@ -81,7 +90,9 @@ async def on_message(message: discord.Message):
             if ctype.startswith("image/"):
                 user_content.append({"type": "image_url", "image_url": {"url": a.url}})
             else:
+                # Non-image: download and include text/preview
                 file_bytes = await download_bytes(a.url)
+
                 if ctype.endswith("/csv") or a.filename.lower().endswith(".csv"):
                     preview = csv_preview(file_bytes, limit_rows=30)
                     user_content.append({
@@ -93,6 +104,7 @@ async def on_message(message: discord.Message):
                         )
                     })
                 else:
+                    # Generic text decode (truncate to keep tokens reasonable)
                     try:
                         txt = file_bytes.decode("utf-8", errors="ignore")
                     except Exception:
@@ -124,13 +136,13 @@ async def on_message(message: discord.Message):
                 "role": "system",
                 "content": (
                     "You are a helpful analyst. Always respond in plain text. "
-                    "Be concise but include bullet points and short rationale where helpful."
+                    "Be concise, use bullet points when helpful, and give clear next steps."
                 ),
             },
             {"role": "user", "content": user_content},
         ]
 
-        # Run blocking OpenAI call in a thread
+        # Run blocking API call in a worker thread so we don't block Discord heartbeats
         def call_openai_chat():
             return client_openai.chat.completions.create(
                 model=MODEL,
@@ -139,10 +151,10 @@ async def on_message(message: discord.Message):
             )
 
         completion = await asyncio.to_thread(call_openai_chat)
-        reply = (completion.choices[0].message.content or "").strip() or \
-                "⚠️ I couldn't generate a response."
+        reply = safe_extract_text(completion) or "⚠️ I couldn't generate a response."
 
-        await thinking.edit(content=reply[:1900])  # Discord limit ~2000 chars
+        # Discord limit ~2000 chars; keep some headroom
+        await thinking.edit(content=reply[:1900])
 
     except Exception as e:
         await thinking.edit(content=f"❌ Error: {e}")
