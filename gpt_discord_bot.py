@@ -135,8 +135,7 @@ async def on_message(message: discord.Message):
             return client_openai.chat.completions.create(
                 model=MODEL,
                 messages=messages,
-                max_completion_tokens=1200,  # ✅ correct param name
-                temperature=0.2,
+                max_completion_tokens=1200  # ✅ correct for GPT-5
             )
 
         completion = await asyncio.to_thread(call_openai_chat)
