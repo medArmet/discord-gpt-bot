@@ -2,17 +2,17 @@
 import os
 import io
 import csv
+import json
 import asyncio
 import aiohttp
 import discord
 from openai import OpenAI
 
-# --- config ---
+# ========= Config =========
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 MODEL = "gpt-5"  # or "gpt-5-mini"
 
-# fail fast if missing env vars
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY is not set")
 if not DISCORD_TOKEN:
@@ -24,44 +24,48 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-def _extract_output_text(resp) -> str:
-    """
-    Robustly extract text from Responses API results.
-    """
-    # 1) Best case: output_text property
+
+# ========= Helpers =========
+def extract_output_text(resp) -> str:
+    """Best-effort text extraction from Responses API."""
     text = getattr(resp, "output_text", None)
     if text:
         return text.strip()
 
-    # 2) Fallback: walk through output[] blocks
     try:
         blocks = getattr(resp, "output", []) or []
         parts = []
         for blk in blocks:
             for c in getattr(blk, "content", []) or []:
-                if getattr(c, "type", "") in ("output_text", "text") and getattr(c, "text", None):
-                    parts.append(c.text)
+                ctype = getattr(c, "type", "")
+                if ctype in ("output_text", "text"):
+                    t = getattr(c, "text", None)
+                    if t:
+                        parts.append(t)
         if parts:
             return "\n".join(parts).strip()
     except Exception:
         pass
-
     return ""
 
-async def _download_bytes(url: str) -> bytes:
+
+async def download_bytes(url: str) -> bytes:
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             resp.raise_for_status()
             return await resp.read()
 
-def _csv_preview(data: bytes, limit_rows: int = 30) -> str:
-    """
-    Decode CSV (utf-8/latin-1 fallback) and return up to N rows as CSV again.
-    """
+
+def csv_preview(data: bytes, limit_rows: int = 30) -> str:
+    """Return a small CSV preview (handles UTF-8 + latin-1; strips BOM)."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         text = data.decode("latin-1", errors="ignore")
+
+    # strip UTF-8 BOM if present
+    if text and text[0] == "\ufeff":
+        text = text[1:]
 
     buf = io.StringIO(text)
     reader = csv.reader(buf)
@@ -72,15 +76,16 @@ def _csv_preview(data: bytes, limit_rows: int = 30) -> str:
             break
         rows.append(row)
 
-    # Re-serialize preview to CSV
     out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerows(rows)
+    csv.writer(out).writerows(rows)
     return out.getvalue()
 
+
+# ========= Discord Events =========
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
+
 
 @client.event
 async def on_message(message: discord.Message):
@@ -105,56 +110,86 @@ async def on_message(message: discord.Message):
         for a in attachments:
             ctype = (a.content_type or "").lower()
             if ctype.startswith("image/"):
-                # Vision input via URL
+                # Vision input: model can fetch via URL
                 content.append({"type": "input_image", "image_url": a.url})
             else:
-                # Download non-image file
-                file_bytes = await _download_bytes(a.url)
+                # Download file bytes
+                file_bytes = await download_bytes(a.url)
 
+                # CSV gets a tidy preview to keep tokens low
                 if ctype.endswith("/csv") or a.filename.lower().endswith(".csv"):
-                    preview = _csv_preview(file_bytes, limit_rows=30)
+                    preview = csv_preview(file_bytes, limit_rows=30)
                     content.append({
                         "type": "input_text",
-                        "text": f"CSV file '{a.filename}' preview (first ~30 rows):\n\n{preview}\n\nPlease analyze this CSV."
+                        "text": (
+                            f"CSV file '{a.filename}' preview (first ~30 rows):\n\n{preview}\n\n"
+                            "Task: Analyze this CSV. Summarize columns & datatypes, key stats, outliers, "
+                            "sentiment themes (if any), and give 3 actionable insights. "
+                            "Respond in plain text."
+                        ),
                     })
                 else:
-                    # Generic text decode with truncation
+                    # Generic text decode (UTF-8 fallback); truncate to avoid huge token bills
                     try:
-                        text = file_bytes.decode("utf-8", errors="ignore")
+                        txt = file_bytes.decode("utf-8", errors="ignore")
                     except Exception:
-                        text = ""
+                        txt = ""
 
-                    if text.strip():
-                        if len(text) > 50_000:
-                            text = text[:50_000] + "\n...[truncated]..."
+                    if txt.strip():
+                        if len(txt) > 50_000:
+                            txt = txt[:50_000] + "\n...[truncated]..."
                         content.append({
                             "type": "input_text",
-                            "text": f"File '{a.filename}' content:\n{text}"
+                            "text": (
+                                f"File '{a.filename}' content:\n{txt}\n\n"
+                                "Task: Analyze this file and respond in plain text."
+                            ),
                         })
                     else:
                         content.append({
                             "type": "input_text",
-                            "text": f"File '{a.filename}' uploaded (type: {ctype or 'unknown'}), "
-                                    f"but it isn't readable as text. Please advise how to process."
+                            "text": (
+                                f"File '{a.filename}' uploaded (type: {ctype or 'unknown'}), "
+                                "but it couldn't be decoded as text. Suggest how to process it. "
+                                "Respond in plain text."
+                            ),
                         })
 
-        # Run the blocking OpenAI call in a thread so we don't freeze the event loop
-        def _call_openai():
+        # If user only sent files, add a final instruction
+        if not prompt:
+            content.append({
+                "type": "input_text",
+                "text": "Please respond only in plain text with a concise but detailed analysis."
+            })
+
+        # Blocking API call -> run in a worker thread
+        def call_openai():
             return client_openai.responses.create(
                 model=MODEL,
+                modalities=["text"],  # <-- force natural-language output
                 input=[{"role": "user", "content": content}],
                 max_output_tokens=1500,
+                # You can also add: temperature=0.2, verbosity="medium"
             )
 
-        resp = await asyncio.to_thread(_call_openai)
-        reply = _extract_output_text(resp) or "⚠️ I couldn't generate a response."
+        resp = await asyncio.to_thread(call_openai)
+        reply = extract_output_text(resp)
 
-        # Discord limit ~2000 chars
+        if not reply:
+            # Log raw response to server logs for debugging
+            try:
+                print("DEBUG: Empty output_text. Full response JSON follows:")
+                print(resp.model_dump_json(indent=2))
+            except Exception:
+                print(f"DEBUG: Could not dump response JSON. Raw object: {resp!r}")
+            reply = "⚠️ I couldn't generate a response (empty model output). I've logged the raw API response to server logs."
+
+        # Discord limit ~2000 chars; keep some headroom
         await thinking.edit(content=reply[:1900])
 
     except Exception as e:
         await thinking.edit(content=f"❌ Error: {e}")
 
+
 if __name__ == "__main__":
-    # -u for unbuffered logs on Render is set via startCommand (recommended)
     client.run(DISCORD_TOKEN)
